@@ -432,7 +432,11 @@ def ensure_campaign(
             "Set target.create_if_missing=true or provide target.campaign_id."
         )
 
+    defaulted: list[str] = []
+
     objective = _get_str(camp_cfg, "objective", "OUTCOME_TRAFFIC").strip() or "OUTCOME_TRAFFIC"
+    if "objective" not in camp_cfg:
+        defaulted.append("campaign.objective")
     objective = objective.upper()
     # Map common legacy/shorthand objectives to the v24+ "Outcome" objectives.
     # Note: LINK_CLICKS is an ad set optimization goal; the campaign objective should be OUTCOME_TRAFFIC.
@@ -441,11 +445,20 @@ def ensure_campaign(
     if objective == "APP_PROMOTION":
         objective = "OUTCOME_APP_PROMOTION"
     buying_type = _get_str(camp_cfg, "buying_type", "AUCTION").strip() or "AUCTION"
+    if "buying_type" not in camp_cfg:
+        defaulted.append("campaign.buying_type")
     # Meta requires this flag in some setups when not using campaign budget (CBO).
     is_abs_enabled = _get_bool(camp_cfg, "is_adset_budget_sharing_enabled", False)
+    if "is_adset_budget_sharing_enabled" not in camp_cfg:
+        defaulted.append("campaign.is_adset_budget_sharing_enabled")
     special = camp_cfg.get("special_ad_categories", [])
     if not isinstance(special, list):
         special = []
+    if "special_ad_categories" not in camp_cfg:
+        defaulted.append("campaign.special_ad_categories")
+
+    if defaulted:
+        print(f"Creating campaign using defaults for: {', '.join(defaulted)}")
 
     resp = _retry(
         lambda: g.post_form(
@@ -507,18 +520,33 @@ def ensure_adset(
         )
 
     # Safe defaults (paused ad set, minimal budget, broad targeting).
+    defaulted: list[str] = []
     daily_budget = _get_int(adset_cfg, "daily_budget", 100)  # currency minor unit (e.g., cents)
+    if "daily_budget" not in adset_cfg:
+        defaulted.append("adset.daily_budget")
     billing_event = _get_str(adset_cfg, "billing_event", "IMPRESSIONS").strip() or "IMPRESSIONS"
-    optimization_goal = _get_str(adset_cfg, "optimization_goal", "LINK_CLICKS").strip() or "LINK_CLICKS"
+    if "billing_event" not in adset_cfg:
+        defaulted.append("adset.billing_event")
+    # Default to IMPRESSIONS to avoid "invalid link" style failures for video creatives when users
+    # haven't provided fully compatible traffic/link-click settings.
+    optimization_goal = _get_str(adset_cfg, "optimization_goal", "IMPRESSIONS").strip() or "IMPRESSIONS"
+    if "optimization_goal" not in adset_cfg:
+        defaulted.append("adset.optimization_goal")
     destination_type = _get_str(adset_cfg, "destination_type", "WEBSITE").strip() or "WEBSITE"
+    if "destination_type" not in adset_cfg:
+        defaulted.append("adset.destination_type")
     bid_strategy = _get_str(adset_cfg, "bid_strategy", "LOWEST_COST_WITHOUT_CAP").strip() or "LOWEST_COST_WITHOUT_CAP"
     bid_strategy = bid_strategy.upper()
+    if "bid_strategy" not in adset_cfg:
+        defaulted.append("adset.bid_strategy")
     targeting = adset_cfg.get(
         "targeting",
         {"geo_locations": {"countries": ["US"]}, "age_min": 18, "age_max": 65},
     )
     if not isinstance(targeting, dict):
         _die("target.adset.targeting must be an object when provided.")
+    if "targeting" not in adset_cfg:
+        defaulted.append("adset.targeting")
 
     payload: dict[str, str] = {
         "name": adset_name,
@@ -543,6 +571,9 @@ def ensure_adset(
         if not isinstance(bid_constraints, dict):
             _die("target.adset.bid_constraints is required when bid_strategy is LOWEST_COST_WITH_MIN_ROAS.")
         payload["bid_constraints"] = _json_dumps(bid_constraints)
+
+    if defaulted:
+        print(f"Creating ad set using defaults for: {', '.join(defaulted)}")
 
     resp = _retry(lambda: g.post_form(f"act_{ad_account_id}/adsets", payload))
     aid = resp.get("id")
@@ -818,6 +849,10 @@ def main() -> int:
         present = bool(os.environ.get(k))
         suffix = " (optional)" if optional else ""
         print(f"- env {k}: {'set' if present else 'MISSING'}{suffix}")
+    for k, optional in [("META_AD_ACCOUNT_ID", True), ("META_PAGE_ID", True)]:
+        present = bool(os.environ.get(k))
+        suffix = " (optional)" if optional else ""
+        print(f"- env {k}: {'set' if present else 'MISSING'}{suffix}")
 
     token = os.environ.get(args.access_token_env) or ""
     if not token:
@@ -826,13 +861,16 @@ def main() -> int:
     spec = _read_json(args.spec)
     spec_dir = os.path.dirname(os.path.abspath(args.spec))
     graph_version = str(spec.get("graph_version") or "v24.0")
-    ad_account_id = str(spec.get("ad_account_id") or "")
-    page_id = str(spec.get("page_id") or "")
+    ad_account_id = str(spec.get("ad_account_id") or os.environ.get("META_AD_ACCOUNT_ID") or "")
+    page_id = str(spec.get("page_id") or os.environ.get("META_PAGE_ID") or "")
 
     if not ad_account_id or not ad_account_id.isdigit():
-        _die("spec.ad_account_id must be the numeric id (no act_ prefix).")
+        _die(
+            "ad_account_id is required and must be the numeric id (no act_ prefix). "
+            "Provide spec.ad_account_id or set META_AD_ACCOUNT_ID."
+        )
     if not page_id:
-        _die("spec.page_id is required.")
+        _die("page_id is required. Provide spec.page_id or set META_PAGE_ID.")
 
     defaults = spec.get("default") or {}
     defaults = _as_dict(defaults, "spec.default")
@@ -859,7 +897,12 @@ def main() -> int:
     status = "PAUSED"
 
     # Resolve placement target (ad set).
-    target = _as_dict(spec.get("target") or {}, "spec.target")
+    raw_target = spec.get("target")
+    target = _as_dict(raw_target or {}, "spec.target")
+    if raw_target is None:
+        print("No spec.target provided; using default campaign/ad set names and default tuning.")
+    elif not target.get("campaign") and not target.get("adset"):
+        print("No spec.target.campaign/adset tuning provided; using default tuning.")
     existing_adset_id = _get_str(target, "adset_id").strip()
     if existing_adset_id:
         campaign_id = _get_str(target, "campaign_id").strip() or ""
