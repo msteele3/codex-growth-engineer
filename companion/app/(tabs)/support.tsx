@@ -12,6 +12,12 @@ const supportItems = [
     description: 'Single-page chat with a friendly avatar response.',
     href: '/support/ai-avatar-chat',
   },
+  {
+    id: 'cod-10',
+    title: 'Model Selector Input',
+    description: 'Add a model selector inside the input box for gpt5.2.',
+    href: '/support/model-selector',
+  },
 ];
 
 export default function SupportScreen() {
