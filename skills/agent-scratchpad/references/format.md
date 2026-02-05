@@ -15,17 +15,19 @@ The scratchpad is intentionally append-only to minimize merge conflicts and redu
 Entries are Markdown headings in this form:
 
 ```
-## <ISO-ish timestamp> | <TYPE> | agent=<agent> | id=<id>
+## <ISO-ish timestamp> | <TYPE> | agent=<agent> | role=<role> | id=<id>
 ```
+
+`role` should match the agent's automation description/prompt (what they do).
 
 Only `QUESTION` entries require an `id`. `ANSWER` entries should include `closes=<question-id>`.
 
 ## Example
 
 ```
-## 2026-02-05 12:34:56 -0800 | QUESTION | agent=codex | id=Q-20260205-123456-12345
+## 2026-02-05 12:34:56 -0800 | QUESTION | agent=codex | role=meta ads uploader | id=Q-20260205-123456-12345
 Do we need exponential backoff on retries? If yes, what caps?
 
-## 2026-02-05 12:50:12 -0800 | ANSWER | agent=codex | closes=Q-20260205-123456-12345
+## 2026-02-05 12:50:12 -0800 | ANSWER | agent=codex | role=meta ads uploader | closes=Q-20260205-123456-12345
 Yes. Use exponential backoff with full jitter, cap at 30s, max 5 attempts.
 ```

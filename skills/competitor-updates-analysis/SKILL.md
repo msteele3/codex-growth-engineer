@@ -28,7 +28,8 @@ https://apps.apple.com/us/app/other-app/id987654321
 python3 skills/competitor-updates-analysis/scripts/track_apps.py \
   --urls-file competitor_urls.txt \
   --out-dir data/update-tracker \
-  --country us
+  --country us \
+  --max-reviews 10
 ```
 
 Outputs:

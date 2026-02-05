@@ -39,6 +39,19 @@ def _agent_name(explicit: str | None) -> str:
     )
 
 
+def _agent_role(explicit: str | None) -> str:
+    if explicit:
+        return explicit
+    return (
+        os.environ.get("CODEX_AGENT_ROLE")
+        or os.environ.get("AGENT_ROLE")
+        # If an agent is running via an automation, the automation prompt/description
+        # is often the best proxy for "what they do".
+        or os.environ.get("CODEX_AUTOMATION_PROMPT")
+        or "unknown"
+    )
+
+
 def _ensure_parent_dir(path: pathlib.Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -73,6 +86,7 @@ def _append_entry(
     path: pathlib.Path,
     entry_type: str,
     agent: str,
+    role: str,
     text: str,
     entry_id: str | None = None,
     closes: str | None = None,
@@ -83,7 +97,7 @@ def _append_entry(
     if entry_type == "QUESTION" and not entry_id:
         entry_id = _new_question_id(ts)
 
-    parts: list[str] = [_format_ts(ts), entry_type, f"agent={agent}"]
+    parts: list[str] = [_format_ts(ts), entry_type, f"agent={agent}", f"role={role}"]
     if entry_id:
         parts.append(f"id={entry_id}")
     if closes:
@@ -150,9 +164,15 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_add(args: argparse.Namespace) -> int:
     entry_type = args.type.strip().upper()
     agent = _agent_name(args.agent)
+    role = _agent_role(args.role)
     path = pathlib.Path(args.file)
     entry_id = _append_entry(
-        path=path, entry_type=entry_type, agent=agent, text=args.text, entry_id=None
+        path=path,
+        entry_type=entry_type,
+        agent=agent,
+        role=role,
+        text=args.text,
+        entry_id=None,
     )
     if entry_id:
         print(entry_id)
@@ -161,9 +181,15 @@ def cmd_add(args: argparse.Namespace) -> int:
 
 def cmd_question(args: argparse.Namespace) -> int:
     agent = _agent_name(args.agent)
+    role = _agent_role(args.role)
     path = pathlib.Path(args.file)
     qid = _append_entry(
-        path=path, entry_type="QUESTION", agent=agent, text=args.text, entry_id=None
+        path=path,
+        entry_type="QUESTION",
+        agent=agent,
+        role=role,
+        text=args.text,
+        entry_id=None,
     )
     print(qid)
     return 0
@@ -171,6 +197,7 @@ def cmd_question(args: argparse.Namespace) -> int:
 
 def cmd_answer(args: argparse.Namespace) -> int:
     agent = _agent_name(args.agent)
+    role = _agent_role(args.role)
     path = pathlib.Path(args.file)
     if not args.closes:
         raise ValueError("--closes is required")
@@ -178,6 +205,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
         path=path,
         entry_type="ANSWER",
         agent=agent,
+        role=role,
         text=args.text,
         entry_id=None,
         closes=args.closes.strip(),
@@ -213,6 +241,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=None)
     p.add_argument("--file", default=str(_default_scratchpad_path()), help="Scratchpad file path.")
     p.add_argument("--agent", default=None, help="Agent name (defaults to env or USER).")
+    p.add_argument(
+        "--role",
+        default=None,
+        help="Agent role/what they do (defaults to env; ideally matches automation description).",
+    )
 
     sub = p.add_subparsers(dest="cmd")
 

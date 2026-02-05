@@ -14,6 +14,10 @@ Given one or more Meta Ads Library advertiser URLs (saved searches for a specifi
 - Audio transcript (OpenAI transcription)
 - LLM vision teardown of each image / video timeline + styling
 
+Optional end-to-end workflow:
+- Generate a *vertical* Sora concept video (default size `720x1280`) informed by the competitor teardown + your product brief
+- Upload it to Meta Ads Manager as a **PAUSED** draft ad via the `meta-ads-draft-uploader` skill
+
 ## Quick Start
 
 1. Create a text file with one advertiser URL per line:
@@ -31,6 +35,33 @@ python3 skills/meta-ads-library-tracker/scripts/track_ads.py \
   --top-n 5 \
   --max-video-seconds 30
 ```
+
+## End-To-End (Analysis -> Sora -> Draft Upload)
+
+This workflow requires a product brief JSON. **If the product brief is missing, stop and ask for it before executing any steps.**
+
+Defaults:
+- Vertical video size: `720x1280`
+- Sora seconds: `8`
+- Draft upload status: `PAUSED`
+
+1. Ensure product brief exists:
+- Example: `skills/meta-ads-library-tracker/references/product_brief.example.json`
+- Default location used by the script: `data/meta-ads-library/product_brief.json`
+
+2. Run the end-to-end workflow:
+
+```bash
+python3 skills/meta-ads-library-tracker/scripts/e2e_workflow.py \
+  --urls-file advertiser_urls.txt \
+  --out-dir data/meta-ads-library \
+  --top-n 5 \
+  --reanalyze-empty \
+  --vision-model gpt-4.1 \
+  --upload --upload-dry-run
+```
+
+Remove `--upload-dry-run` to actually create the PAUSED draft ad.
 
 ## Requirements
 

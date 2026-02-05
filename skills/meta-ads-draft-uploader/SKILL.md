@@ -17,6 +17,7 @@ Terminology:
 
 Safety invariant:
 - Never create an `ACTIVE` campaign/ad set/ad. This skill always creates `PAUSED` objects only. Turn things on manually in Ads Manager after review.
+- Always use a Download CTA (`DOWNLOAD`).
 
 ## Quick Start
 
@@ -26,6 +27,8 @@ Safety invariant:
 ```bash
 export META_USER_ACCESS_TOKEN="EAAB..."
 ```
+
+Alternatively, put `META_USER_ACCESS_TOKEN=...` in a `.env` file (the script will auto-load the first `.env` it finds from: the spec file’s directory, the repo root, or your current working directory). To disable this behavior, pass `--dotenv off`.
 
 3. Run:
 

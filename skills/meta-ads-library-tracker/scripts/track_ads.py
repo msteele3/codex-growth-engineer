@@ -25,6 +25,67 @@ DEFAULT_USER_AGENT = (
 )
 
 
+def _repo_root() -> pathlib.Path:
+    # This script lives at: <repo>/skills/meta-ads-library-tracker/scripts/track_ads.py
+    # So repo root is 3 parents up from scripts/.
+    return pathlib.Path(__file__).resolve().parents[3]
+
+
+def _load_dotenv_file(path: pathlib.Path) -> dict[str, str]:
+    """
+    Minimal .env parser:
+    - supports KEY=VALUE
+    - strips surrounding single/double quotes
+    - ignores blank lines and comments
+    """
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k = k.strip()
+        v = v.strip()
+        if not k:
+            continue
+        if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+            v = v[1:-1]
+        env[k] = v
+    return env
+
+
+def _maybe_load_dotenv(mode: str, *, override: bool) -> None:
+    """
+    Loads env vars from a .env file into os.environ.
+    - mode="off": do nothing
+    - mode="auto": try repo root .env, then cwd .env
+    - otherwise: treat as a path to a .env file
+    If override=True, values from .env replace existing os.environ values.
+    """
+    m = (mode or "").strip() or "auto"
+    if m == "off":
+        return
+
+    candidates: list[pathlib.Path]
+    if m == "auto":
+        candidates = [_repo_root() / ".env", pathlib.Path.cwd() / ".env"]
+    else:
+        candidates = [pathlib.Path(m)]
+
+    for p in candidates:
+        loaded = _load_dotenv_file(p)
+        if not loaded:
+            continue
+        for k, v in loaded.items():
+            if override or (k not in os.environ) or ((os.environ.get(k) or "") == ""):
+                os.environ[k] = v
+        return
+
+
 def _today_local() -> dt.date:
     return dt.date.today()
 
@@ -203,35 +264,65 @@ def _chat_json(
     if system:
         messages.append({"role": "system", "content": system})
     messages.append({"role": "user", "content": user_content})
+
+    def _parse_text(s: str) -> tuple[dict[str, Any] | None, str]:
+        s = (s or "").strip()
+        if not s:
+            return None, ""
+        try:
+            return json.loads(s), s
+        except Exception:
+            # Try to salvage a JSON object embedded in a longer response.
+            m = re.search(r"\{.*\}", s, re.S)
+            if m:
+                try:
+                    return json.loads(m.group(0)), s
+                except Exception:
+                    pass
+            return None, s
+
+    text = ""
+    # Chat Completions: works for text-only content, but some models return empty
+    # content when vision parts are present. We'll fall back to Responses if needed.
     try:
         resp = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.2,
             max_completion_tokens=max_tokens,
             response_format={"type": "json_object"},
         )
+        text = (resp.choices[0].message.content or "").strip()
     except Exception:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_completion_tokens=max_tokens,
-        )
-    text = (resp.choices[0].message.content or "").strip()
+        # We'll fall back below.
+        text = ""
+
     if not text:
-        return None, ""
-    try:
-        return json.loads(text), text
-    except Exception:
-        # Try to salvage a JSON object embedded in a longer response.
-        m = re.search(r"\{.*\}", text, re.S)
-        if m:
-            try:
-                return json.loads(m.group(0)), text
-            except Exception:
-                pass
-        return None, text
+        # Responses API supports multimodal reliably (input_text/input_image).
+        input_parts: list[dict[str, Any]] = []
+        for part in user_content:
+            t = part.get("type")
+            if t == "text":
+                input_parts.append({"type": "input_text", "text": str(part.get("text") or "")})
+            elif t == "image_url":
+                url = ((part.get("image_url") or {}).get("url") or "").strip()
+                if url:
+                    input_parts.append({"type": "input_image", "image_url": url})
+            else:
+                # Unknown part type; ignore.
+                continue
+
+        r = client.responses.create(
+            model=model,
+            instructions=system or None,
+            input=[{"role": "user", "content": input_parts}],
+            max_output_tokens=max_tokens,
+            # Enforce a single JSON object output for resilience.
+            text={"format": {"type": "json_object"}},
+        )
+        text = (getattr(r, "output_text", "") or "").strip()
+
+    parsed, raw = _parse_text(text)
+    return parsed, raw
 
 
 def _print_stderr(msg: str) -> None:
@@ -571,6 +662,23 @@ def scrape_ad_details(*, context, ad_archive_id: str, timeout_s: int) -> AdDetai
         page.close()
 
 
+def _load_snapshot_ads(
+    *, snapshots_dir: pathlib.Path, advertiser_key: str
+) -> list[dict[str, Any]] | None:
+    """
+    Reads snapshots/<advertiser_key>/latest.json if present and returns its top_ads list.
+    Used to support running the script in parts (download first, analyze later).
+    """
+    p = snapshots_dir / advertiser_key / "latest.json"
+    if not p.exists():
+        return None
+    d = _load_json(p) or {}
+    ads = d.get("top_ads")
+    if isinstance(ads, list):
+        return [x for x in ads if isinstance(x, dict)]
+    return None
+
+
 def _guess_ext_from_url(url: str, *, default: str) -> str:
     parsed = urllib.parse.urlparse(url)
     path = parsed.path or ""
@@ -630,6 +738,35 @@ def _as_relpath(path: pathlib.Path, base: pathlib.Path) -> str:
         return str(path.relative_to(base))
     except Exception:
         return str(path)
+
+
+def _analysis_needs_rerun(obj: dict[str, Any] | None) -> bool:
+    if not obj:
+        return True
+    err = (obj.get("error") or "").strip() if isinstance(obj.get("error"), str) else ""
+    if err:
+        return True
+    raw = (obj.get("raw_text") or "") if isinstance(obj.get("raw_text"), str) else ""
+    # Empty raw text is effectively "no analysis" for our purposes.
+    if raw.strip() == "" and set(obj.keys()) <= {"raw_text"}:
+        return True
+    # If we only have raw_text, ensure it's a valid JSON object; otherwise rerun.
+    if set(obj.keys()) == {"raw_text"}:
+        if raw.strip() == "":
+            return True
+        try:
+            parsed = json.loads(raw)
+            return not isinstance(parsed, dict)
+        except Exception:
+            return True
+    return False
+
+
+def _load_json(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def analyze_image_ad(
@@ -727,6 +864,138 @@ def analyze_video_ad(
     return parsed or {"raw_text": raw}
 
 
+def _find_existing_media_files(*, out_dir: pathlib.Path, ad_dir: pathlib.Path, meta_obj: dict[str, Any]) -> tuple[list[pathlib.Path], list[pathlib.Path]]:
+    imgs: list[pathlib.Path] = []
+    vids: list[pathlib.Path] = []
+
+    rel_imgs = meta_obj.get("downloaded_images")
+    if isinstance(rel_imgs, list):
+        for r in rel_imgs:
+            p = out_dir / str(r)
+            if p.exists():
+                imgs.append(p)
+
+    rel_vids = meta_obj.get("downloaded_videos")
+    if isinstance(rel_vids, list):
+        for r in rel_vids:
+            p = out_dir / str(r)
+            if p.exists():
+                vids.append(p)
+
+    # Fall back to scanning bundle dirs if meta.json doesn't have paths (or they moved).
+    if not imgs:
+        imgs = sorted((ad_dir / "images").glob("image_*.*"))
+    if not vids:
+        vids = sorted((ad_dir / "video").glob("video_*.*"))
+
+    return imgs, vids
+
+
+def _reanalyze_from_existing_bundle(
+    *,
+    model: str,
+    out_dir: pathlib.Path,
+    ad_dir: pathlib.Path,
+    meta_obj: dict[str, Any],
+    fps: int,
+    max_video_seconds: int,
+    transcribe_model: str,
+) -> tuple[dict[str, Any], str]:
+    """
+    Re-runs analysis using whatever creative files already exist on disk.
+    Extracts frames/audio/transcript if missing. Does not scrape network.
+    """
+    kind = str(meta_obj.get("kind") or "").strip() or "unknown"
+    ad_text = str(meta_obj.get("extracted_text") or "")
+
+    imgs, vids = _find_existing_media_files(out_dir=out_dir, ad_dir=ad_dir, meta_obj=meta_obj)
+    analysis_inputs_dir = ad_dir / "analysis_inputs"
+
+    transcript = ""
+    if kind == "video" or (kind == "unknown" and vids):
+        if not vids:
+            return {"error": "missing_video_assets"}, ""
+        video_path = vids[0]
+        frames_dir = ad_dir / "frames"
+        audio_path = ad_dir / "audio" / "audio.mp3"
+        transcript_path = ad_dir / "audio" / "transcript.txt"
+
+        if not frames_dir.exists() or not any(frames_dir.glob("frame_*.jpg")):
+            _extract_frames(
+                video_path,
+                frames_dir,
+                fps=max(1, fps),
+                max_seconds=max(1, max_video_seconds),
+            )
+        if not audio_path.exists():
+            _extract_audio(video_path, audio_path, max_seconds=max(1, max_video_seconds))
+        if transcript_path.exists():
+            transcript = transcript_path.read_text(encoding="utf-8").strip()
+        if not transcript and audio_path.exists():
+            transcript = _transcribe_audio(audio_path=audio_path, model=transcribe_model)
+            _write_text(transcript_path, transcript + "\n")
+
+        max_frames = max(1, min(30, max_video_seconds * max(1, fps)))
+        frame_paths = sorted(frames_dir.glob("frame_*.jpg"))[:max_frames]
+        llm_frames: list[pathlib.Path] = []
+        for fp in frame_paths:
+            llm_frames.append(
+                _downscale_for_llm(
+                    fp,
+                    analysis_inputs_dir / "frames" / fp.name,
+                    max_side_px=768,
+                    jpeg_quality=70,
+                )
+            )
+
+        palette_overall: list[str] = []
+        try:
+            if llm_frames:
+                palette_overall = _dominant_colors_hex(llm_frames[0], n=6)
+        except Exception:
+            palette_overall = []
+
+        analysis_obj = analyze_video_ad(
+            model=model,
+            ad_meta=meta_obj,
+            frame_paths=llm_frames,
+            transcript=transcript,
+            ad_text=ad_text,
+            palette_overall=palette_overall,
+            max_tokens=2000,
+        )
+        return analysis_obj, transcript
+
+    # Image ad.
+    if not imgs:
+        return {"error": "missing_image_assets"}, ""
+
+    llm_images: list[pathlib.Path] = []
+    palette_by_image: dict[str, list[str]] = {}
+    for img in imgs[:5]:
+        llm_img = _downscale_for_llm(
+            img,
+            analysis_inputs_dir / "images" / (img.stem + ".jpg"),
+            max_side_px=1024,
+            jpeg_quality=75,
+        )
+        llm_images.append(llm_img)
+        try:
+            palette_by_image[llm_img.name] = _dominant_colors_hex(llm_img, n=6)
+        except Exception:
+            palette_by_image[llm_img.name] = []
+
+    analysis_obj = analyze_image_ad(
+        model=model,
+        ad_meta=meta_obj,
+        image_paths=llm_images,
+        ad_text=ad_text,
+        palette_by_image=palette_by_image,
+        max_tokens=1200,
+    )
+    return analysis_obj, ""
+
+
 def _format_ad_text(details: AdDetails) -> str:
     parts: list[str] = []
     for label, xs in (
@@ -786,13 +1055,49 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         description="Scrape Meta Ads Library advertiser URLs, find longest-running active ads, and generate creative bundles + analysis.",
     )
+    parser.add_argument(
+        "--dotenv",
+        type=str,
+        default="auto",
+        help="Load env vars from a .env file. Use 'auto' (default), 'off', or a path to a .env file.",
+    )
+    parser.add_argument(
+        "--dotenv-override",
+        action="store_true",
+        help="If set, values from .env override existing environment variables.",
+    )
+    parser.add_argument(
+        "--analysis-only",
+        action="store_true",
+        help="Do not scrape/download. Load ad ids from snapshots/<advertiser_key>/latest.json and (re)run analysis on existing bundles.",
+    )
+    parser.add_argument(
+        "--skip-download",
+        action="store_true",
+        help="Skip downloading creatives (still scrapes ad ids/details). Useful to run in parts.",
+    )
+    parser.add_argument(
+        "--reanalyze-empty",
+        action="store_true",
+        help="If analysis.json is missing or empty, redo analysis for that ad (no re-download).",
+    )
+    parser.add_argument(
+        "--reanalyze-errors",
+        action="store_true",
+        help="If analysis.json contains an error, redo analysis for that ad (no re-download).",
+    )
     parser.add_argument("--urls-file", type=str, help="Path to a text file with one advertiser URL per line.")
     parser.add_argument("--url", action="append", default=[], help="Advertiser URL (repeatable).")
     parser.add_argument("--out-dir", type=str, default="data/meta-ads-library", help="Output directory.")
     parser.add_argument("--top-n", type=int, default=5, help="Number of longest-running active ads to keep per advertiser.")
     parser.add_argument("--max-video-seconds", type=int, default=30, help="Max seconds to analyze per video.")
     parser.add_argument("--fps", type=int, default=1, help="Frames per second to extract for videos.")
-    parser.add_argument("--vision-model", type=str, default="gpt-5.2", help="Vision-capable model for creative analysis.")
+    parser.add_argument(
+        "--vision-model",
+        type=str,
+        default="gpt-5-mini-2025-08-07",
+        help="Vision-capable model for creative analysis.",
+    )
     parser.add_argument("--transcribe-model", type=str, default="whisper-1", help="OpenAI transcription model.")
     parser.add_argument("--timeout-s", type=int, default=60, help="Per-page timeout in seconds.")
     parser.add_argument("--max-scrolls", type=int, default=25, help="Max scroll iterations on advertiser page.")
@@ -805,10 +1110,17 @@ def main(argv: list[str]) -> int:
         default="chrome",
         help="Playwright Chromium channel to use (default: chrome). Use empty string to use bundled Playwright Chromium.",
     )
+    parser.add_argument(
+        "--allow-channel-fallback",
+        action="store_true",
+        help="If set, fall back to bundled Playwright Chromium when launching the requested --browser-channel fails.",
+    )
     parser.add_argument("--debug", action="store_true", help="Save extra debug artifacts (lightweight).")
     parser.add_argument("--skip-analysis", action="store_true", help="Download creatives but skip OpenAI analysis.")
     parser.add_argument("--force", action="store_true", help="Re-download/re-analyze even if bundle exists.")
     args = parser.parse_args(argv)
+
+    _maybe_load_dotenv(args.dotenv, override=bool(args.dotenv_override))
 
     urls: list[str] = []
     if args.urls_file:
@@ -824,7 +1136,8 @@ def main(argv: list[str]) -> int:
             _print_stderr(f"[WARN] URL does not look like an Ads Library URL: {u}")
 
     _ensure_ffmpeg()
-    _require_playwright()
+    if not args.analysis_only:
+        _require_playwright()
 
     out_dir = pathlib.Path(args.out_dir)
     run_date = _today_local().isoformat()
@@ -836,6 +1149,78 @@ def main(argv: list[str]) -> int:
 
     from playwright.sync_api import sync_playwright
 
+    if args.analysis_only:
+        for advertiser_url in urls:
+            page_id = _parse_view_all_page_id(advertiser_url) or ""
+            advertiser_key = _slugify(page_id) if page_id else _slugify(advertiser_url)
+            advertiser_rec: dict[str, Any] = {"key": advertiser_key, "url": advertiser_url, "page_id": page_id}
+
+            snap_ads = _load_snapshot_ads(snapshots_dir=snapshots_dir, advertiser_key=advertiser_key) or []
+            out_ads: list[dict[str, Any]] = []
+
+            for a in snap_ads[: args.top_n]:
+                ad_id = str(a.get("ad_archive_id") or "").strip()
+                if not ad_id:
+                    continue
+                ad_dir = creatives_dir / advertiser_key / ad_id
+                analysis_path = ad_dir / "analysis.json"
+                meta_path = ad_dir / "meta.json"
+
+                meta_obj = _load_json(meta_path) if meta_path.exists() else None
+                analysis_obj = _load_json(analysis_path) if analysis_path.exists() else None
+
+                if meta_obj is None:
+                    _print_stderr(f"[WARN] Missing meta.json for ad {ad_id} ({advertiser_key}); skipping.")
+                    continue
+
+                needs_rerun = False
+                if not args.skip_analysis:
+                    if analysis_obj is None:
+                        needs_rerun = True
+                    if args.reanalyze_errors and isinstance(analysis_obj, dict) and (analysis_obj.get("error") or "").strip():
+                        needs_rerun = True
+                    if args.reanalyze_empty and _analysis_needs_rerun(analysis_obj if isinstance(analysis_obj, dict) else None):
+                        needs_rerun = True
+
+                transcript = str(a.get("transcript") or "").strip()
+                if not args.skip_analysis and (needs_rerun or args.force):
+                    try:
+                        analysis_obj, transcript = _reanalyze_from_existing_bundle(
+                            model=args.vision_model,
+                            out_dir=out_dir,
+                            ad_dir=ad_dir,
+                            meta_obj=meta_obj,
+                            fps=max(1, args.fps),
+                            max_video_seconds=max(1, args.max_video_seconds),
+                            transcribe_model=args.transcribe_model,
+                        )
+                    except Exception as e:
+                        _print_stderr(f"[ERROR] OpenAI/analysis failed for ad {ad_id}: {e}")
+                        analysis_obj = {"error": str(e)}
+                    _json_dump(analysis_path, analysis_obj)
+
+                out_ads.append(
+                    {
+                        "ad_archive_id": ad_id,
+                        "started_running": a.get("started_running") or meta_obj.get("started_running") or "",
+                        "days_running": a.get("days_running") or meta_obj.get("days_running") or None,
+                        "kind": a.get("kind") or meta_obj.get("kind") or "unknown",
+                        "bundle_dir": _as_relpath(ad_dir, out_dir),
+                        "analysis": analysis_obj,
+                        "transcript": transcript if transcript else None,
+                    }
+                )
+
+            snapshot_obj = {"run_date": run_date, "advertiser": advertiser_rec, "top_ads": out_ads}
+            snap_path = snapshots_dir / advertiser_key / f"{run_date}.json"
+            _json_dump(snap_path, snapshot_obj)
+            _json_dump(snapshots_dir / advertiser_key / "latest.json", snapshot_obj)
+            results.append(snapshot_obj)
+
+        report_path = reports_dir / f"{run_date}.md"
+        _write_daily_report(report_path=report_path, out_dir=out_dir, run_date=run_date, results=results)
+        return 0
+
     with sync_playwright() as p:
         launch_kwargs: dict[str, Any] = {"headless": not args.headful}
         channel = (args.browser_channel or "").strip()
@@ -844,9 +1229,11 @@ def main(argv: list[str]) -> int:
         try:
             browser = p.chromium.launch(**launch_kwargs)
         except Exception:
-            # Fallback for environments without the specified channel installed.
-            launch_kwargs.pop("channel", None)
-            browser = p.chromium.launch(**launch_kwargs)
+            if channel and args.allow_channel_fallback:
+                # Fallback for environments without the specified channel installed.
+                launch_kwargs.pop("channel", None)
+                browser = p.chromium.launch(**launch_kwargs)
+            raise
         context = browser.new_context(user_agent=DEFAULT_USER_AGENT, viewport={"width": 1280, "height": 900})
         try:
             for advertiser_url in urls:
@@ -889,16 +1276,42 @@ def main(argv: list[str]) -> int:
                         and not args.force
                     ):
                         # If bundle exists, load best-effort.
-                        analysis_obj = None
-                        meta_obj = None
+                        analysis_obj = _load_json(analysis_path) if analysis_path.exists() else None
+                        meta_obj = _load_json(meta_path) if meta_path.exists() else None
+
+                        transcript = None
                         try:
-                            analysis_obj = json.loads(analysis_path.read_text(encoding="utf-8"))
+                            tpath = ad_dir / "audio" / "transcript.txt"
+                            if tpath.exists():
+                                transcript = tpath.read_text(encoding="utf-8").strip() or None
                         except Exception:
-                            pass
-                        try:
-                            meta_obj = json.loads(meta_path.read_text(encoding="utf-8"))
-                        except Exception:
-                            pass
+                            transcript = None
+
+                        needs_rerun = False
+                        if not args.skip_analysis:
+                            if analysis_obj is None:
+                                needs_rerun = True
+                            if args.reanalyze_errors and isinstance(analysis_obj, dict) and (analysis_obj.get("error") or "").strip():
+                                needs_rerun = True
+                            if args.reanalyze_empty and _analysis_needs_rerun(analysis_obj if isinstance(analysis_obj, dict) else None):
+                                needs_rerun = True
+
+                        if meta_obj is not None and not args.skip_analysis and needs_rerun:
+                            try:
+                                analysis_obj, t = _reanalyze_from_existing_bundle(
+                                    model=args.vision_model,
+                                    out_dir=out_dir,
+                                    ad_dir=ad_dir,
+                                    meta_obj=meta_obj,
+                                    fps=max(1, args.fps),
+                                    max_video_seconds=max(1, args.max_video_seconds),
+                                    transcribe_model=args.transcribe_model,
+                                )
+                                transcript = t.strip() or transcript
+                            except Exception as e:
+                                _print_stderr(f"[ERROR] OpenAI/analysis failed for ad {ad_id}: {e}")
+                                analysis_obj = {"error": str(e)}
+                            _json_dump(analysis_path, analysis_obj)
                         out_ads.append(
                             {
                                 "ad_archive_id": ad_id,
@@ -907,6 +1320,7 @@ def main(argv: list[str]) -> int:
                                 "kind": (meta_obj or {}).get("kind") or "unknown",
                                 "bundle_dir": _as_relpath(ad_dir, out_dir),
                                 "analysis": analysis_obj,
+                                "transcript": transcript,
                             }
                         )
                         continue
@@ -996,7 +1410,8 @@ def main(argv: list[str]) -> int:
 
                                     # Build LLM inputs (downscaled copies).
                                     llm_frames: list[pathlib.Path] = []
-                                    for fp in frame_paths[:30]:
+                                    max_frames = max(1, min(30, max(1, args.max_video_seconds) * max(1, args.fps)))
+                                    for fp in frame_paths[:max_frames]:
                                         llm_frames.append(
                                             _downscale_for_llm(
                                                 fp,

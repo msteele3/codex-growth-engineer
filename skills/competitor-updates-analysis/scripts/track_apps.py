@@ -131,36 +131,59 @@ def _clean_ws(s: str) -> str:
 
 
 def _extract_in_app_purchases_from_html(page_html: str) -> list[dict[str, str]]:
-    # Best-effort heuristic: find the "In-App Purchases" block and then extract line items with a price.
-    # Apple frequently formats these with truncation divs; HTML is not stable.
+    # Best-effort extraction of the "In-App Purchases" table.
+    #
+    # App Store markup (as of 2026-02) commonly looks like:
+    # <dt>In-App Purchases</dt>
+    # <details> ... <div class="text-pair ..."><span>MONTHLY</span><span>$7.99</span>
+    #
+    # Apple’s HTML changes; keep this heuristic and bounded.
     out: list[dict[str, str]] = []
     if "In-App Purchases" not in page_html:
         return out
 
-    # Narrow the search to a window after the marker to reduce false positives.
+    # Narrow to the closest block starting at the <dt> marker.
     idx = page_html.find("In-App Purchases")
-    window = page_html[idx : idx + 200_000] if idx >= 0 else page_html
+    window = page_html[idx : idx + 250_000] if idx >= 0 else page_html
 
-    # Find likely "name ... $x.xx" occurrences.
-    # Accept multiple currencies and comma decimals.
-    price_re = re.compile(
-        r">([^<>]{1,200}?)<[^>]{0,100}?>\s*"
-        r"(?:US\\s*)?([\\$€£¥]|R\\$|CA\\$|A\\$)\\s*([0-9][0-9\\.,]{0,10})",
+    # First try: paired <span>NAME</span><span>PRICE</span> within a text-pair div.
+    pair_re = re.compile(
+        r'text-pair[^>]*>\s*<span[^>]*>\s*([^<]{1,200}?)\s*</span>\s*<span[^>]*>\s*([^<]{1,40}?)\s*</span>',
         re.I,
     )
 
     seen: set[tuple[str, str]] = set()
+    for m in pair_re.finditer(window):
+        name = _clean_ws(m.group(1))
+        price = _clean_ws(m.group(2))
+        if not name or not price:
+            continue
+        # Sanity: price should contain a currency sign or ISO-like code.
+        if not re.search(r"[\$€£¥]|R\$|CA\$|A\$|USD|EUR|GBP|JPY", price, re.I):
+            continue
+        key = (name, price)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"name": name, "price": price})
+        if len(out) >= 80:
+            return out
+
+    # Fallback: looser "NAME ... $x.xx" heuristic.
+    price_re = re.compile(
+        r">([^<>]{1,200}?)<[^>]{0,120}?>[^<]{0,40}?"
+        r"([\\$€£¥]|R\\$|CA\\$|A\\$)\\s*([0-9][0-9\\.,]{0,10})",
+        re.I,
+    )
     for m in price_re.finditer(window):
         name = _clean_ws(m.group(1))
-        currency_symbol = m.group(2).strip()
-        amount = m.group(3).strip()
-        price = f"{currency_symbol}{amount}"
+        price = f"{m.group(2).strip()}{m.group(3).strip()}"
         key = (name, price)
         if not name or key in seen:
             continue
         seen.add(key)
         out.append({"name": name, "price": price})
-        if len(out) >= 50:
+        if len(out) >= 80:
             break
     return out
 
@@ -194,6 +217,7 @@ def _extract_subscription_price_points(iaps: Iterable[dict[str, str]]) -> list[d
 
 @dataclasses.dataclass(frozen=True)
 class Review:
+    id: str | None
     author: str
     title: str
     body: str
@@ -202,64 +226,79 @@ class Review:
 
 
 def _extract_recent_reviews_from_html(page_html: str, *, max_reviews: int) -> list[Review]:
-    # Best-effort extraction from the "see all reviews" view.
-    # Look for common review container class names like "we-customer-review".
+    # App Store pages (including the "see all reviews" view) often embed review data in a JSON-ish blob:
+    # ..."componentType":"productReview"... "review":{ ... }
+    #
+    # This is far more reliable than scraping rendered HTML classes.
     reviews: list[Review] = []
-
-    # Split into blocks around likely markers.
-    blocks = re.split(r'we-customer-review|customer-review|we-customer-review__content', page_html, flags=re.I)
-    if len(blocks) <= 1:
-        return reviews
-
-    # Work on smaller slices to avoid runaway regex times.
-    for blk in blocks[1:]:
-        if len(reviews) >= max_reviews:
+    needle = '"componentType":"productReview"'
+    pos = 0
+    seen_ids: set[str] = set()
+    while len(reviews) < max_reviews:
+        i = page_html.find(needle, pos)
+        if i == -1:
             break
-        snippet = blk[:40_000]
-
-        # Rating often represented by aria-label like "5 out of 5".
-        rating = None
-        m_rating = re.search(r'aria-label="\\s*([0-5])\\s+out\\s+of\\s+5', snippet, flags=re.I)
-        if m_rating:
-            try:
-                rating = int(m_rating.group(1))
-            except ValueError:
-                rating = None
-
-        # Title is often in <h3> or similar.
-        title = ""
-        m_title = re.search(r"<h3[^>]*>([^<]{1,200})</h3>", snippet, flags=re.I)
-        if m_title:
-            title = _clean_ws(m_title.group(1))
-
-        # Body is often in a paragraph-ish container; grab a conservative chunk.
-        body = ""
-        m_body = re.search(r'we-truncate[^>]*>\\s*<[^>]+>\\s*([^<]{20,2000})<', snippet, flags=re.I)
-        if m_body:
-            body = _clean_ws(m_body.group(1))
-        else:
-            # Fallback: first longer text span.
-            m_body2 = re.search(r">([^<>]{40,2000})<", snippet)
-            if m_body2:
-                body = _clean_ws(m_body2.group(1))
-
-        # Author sometimes appears near "by <name>".
-        author = ""
-        m_author = re.search(r"by\\s*</span>\\s*<span[^>]*>([^<]{1,80})</span>", snippet, flags=re.I)
-        if m_author:
-            author = _clean_ws(m_author.group(1))
-
-        # Date sometimes in <time datetime="...">.
-        date = None
-        m_date = re.search(r'<time[^>]+datetime="([^"]{4,40})"', snippet, flags=re.I)
-        if m_date:
-            date = _clean_ws(m_date.group(1))
-
-        if not (title or body):
+        pos = i + len(needle)
+        # Search a bounded slice for the review object.
+        window = page_html[i : i + 120_000]
+        j = window.find('"review":{')
+        if j == -1:
+            continue
+        j = j + len('"review":')
+        s = window[j:]
+        if not s or s[0] != "{":
             continue
 
-        reviews.append(Review(author=author, title=title, body=body, rating=rating, date=date))
+        # Brace-match JSON object, respecting strings/escapes.
+        depth = 0
+        in_str = False
+        esc = False
+        end_idx = None
+        for k, ch in enumerate(s):
+            if in_str:
+                if esc:
+                    esc = False
+                elif ch == "\\":
+                    esc = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_idx = k + 1
+                    break
+        if end_idx is None:
+            continue
 
+        obj_txt = s[:end_idx]
+        try:
+            data = json.loads(obj_txt)
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        rid = str(data.get("id") or "").strip() or None
+        if rid and rid in seen_ids:
+            continue
+        if rid:
+            seen_ids.add(rid)
+
+        reviews.append(
+            Review(
+                id=rid,
+                author=_clean_ws(str(data.get("reviewerName") or "")),
+                title=_clean_ws(str(data.get("title") or "")),
+                body=_clean_ws(str(data.get("contents") or "")),
+                rating=int(data["rating"]) if isinstance(data.get("rating"), (int, float)) else None,
+                date=_clean_ws(str(data.get("date") or "")) or None,
+            )
+        )
     return reviews
 
 
@@ -543,24 +582,48 @@ def main() -> int:
                 result["in_app_purchases"] = []
                 result["subscription_prices"] = []
 
-            # Reviews: prefer the see-all view to increase likelihood of containing review blocks.
-            reviews_html = ""
-            try:
-                reviews_url = _with_query_param(url, "see-all", "reviews")
-                raw, _, resp_headers = _fetch(reviews_url, timeout_s=args.timeout, headers=headers)
-                reviews_html = _decode_html(raw, resp_headers)
-                result["reviews_url"] = reviews_url
-            except Exception as e:
-                result["errors"].append(f"Reviews fetch failed: {type(e).__name__}: {e}")
-
+            # Reviews: try to extract from the main app HTML first (often already contains productReview blobs).
             recent: list[dict[str, Any]] = []
-            if reviews_html:
+            if page_html:
                 try:
-                    extracted = _extract_recent_reviews_from_html(reviews_html, max_reviews=args.max_reviews)
+                    extracted = _extract_recent_reviews_from_html(page_html, max_reviews=args.max_reviews)
                     for r in extracted:
                         recent.append(dataclasses.asdict(r))
                 except Exception as e:
-                    result["errors"].append(f"Reviews parse failed: {type(e).__name__}: {e}")
+                    result["errors"].append(f"Reviews parse failed (main page): {type(e).__name__}: {e}")
+
+            # If still short, fetch the dedicated reviews page. Keep it deterministic with sort=mostRecent.
+            if len(recent) < args.max_reviews:
+                reviews_html = ""
+                try:
+                    reviews_url = _with_query_param(url, "see-all", "reviews")
+                    reviews_url = _with_query_param(reviews_url, "sort", "mostRecent")
+                    raw, _, resp_headers = _fetch(reviews_url, timeout_s=args.timeout, headers=headers)
+                    reviews_html = _decode_html(raw, resp_headers)
+                    result["reviews_url"] = reviews_url
+                except Exception as e:
+                    result["errors"].append(f"Reviews fetch failed: {type(e).__name__}: {e}")
+
+                if reviews_html:
+                    try:
+                        extracted = _extract_recent_reviews_from_html(reviews_html, max_reviews=args.max_reviews)
+                        seen_review_ids: set[str] = set()
+                        for r in recent:
+                            rid = str(r.get("id") or "").strip()
+                            if rid:
+                                seen_review_ids.add(rid)
+                        # Only fill in missing slots to avoid duplicates when main-page extraction worked.
+                        for r in extracted:
+                            if len(recent) >= args.max_reviews:
+                                break
+                            rid = str(r.id or "").strip() if hasattr(r, "id") else ""
+                            if rid and rid in seen_review_ids:
+                                continue
+                            if rid:
+                                seen_review_ids.add(rid)
+                            recent.append(dataclasses.asdict(r))
+                    except Exception as e:
+                        result["errors"].append(f"Reviews parse failed (reviews page): {type(e).__name__}: {e}")
             result["recent_reviews"] = recent
             result["review_themes"] = _summarize_review_themes(recent)
 

@@ -37,6 +37,9 @@ python3 skills/agent-scratchpad/scripts/scratchpad.py tail --n 20
 ## Operating Protocol (Multi-Agent)
 
 - Always read `scratchpad/AGENT_SCRATCHPAD.md` before starting non-trivial work.
+- Every entry must include:
+  - `agent`: who wrote it
+  - `role`: what they do (match the agent's automation description/prompt)
 - Write an entry at the start of work:
   - `TASK`: what you are taking, what you expect to change, and where.
 - Write an entry after producing output:
@@ -49,5 +52,6 @@ python3 skills/agent-scratchpad/scripts/scratchpad.py tail --n 20
 - Prefer append-only entries (minimize edits to old text).
 - Include concrete pointers: absolute paths, command lines, and “what to look for”.
 - Keep entries short; use links/paths to the real artifacts.
+- If your runtime provides it, set `CODEX_AGENT` and `CODEX_AGENT_ROLE` (or pass `--agent` / `--role`) so headers are consistently stamped.
 
 If you need the exact entry format, see `skills/agent-scratchpad/references/format.md`.

@@ -24,6 +24,8 @@ import hmac
 import json
 import os
 import random
+import pathlib
+import subprocess
 import sys
 import time
 import urllib.error
@@ -37,10 +39,105 @@ def _die(msg: str, code: int = 2) -> None:
     print(msg, file=sys.stderr)
     raise SystemExit(code)
 
+CTA_TYPE = "DOWNLOAD"  # Safety invariant: always use a Download CTA.
+
+def _normalize_url(url: str) -> str:
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if url.startswith("http://") or url.startswith("https://"):
+        return url
+    return "https://" + url
+
 
 def _read_json(path: str) -> dict[str, Any]:
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _repo_root() -> pathlib.Path:
+    # <repo>/skills/meta-ads-draft-uploader/scripts/meta_ads_draft_uploader.py
+    try:
+        return pathlib.Path(__file__).resolve().parents[3]
+    except Exception:
+        return pathlib.Path.cwd()
+
+
+def _strip_quotes(v: str) -> str:
+    v = v.strip()
+    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
+        return v[1:-1]
+    return v
+
+
+def _load_dotenv_file(path: pathlib.Path) -> dict[str, str]:
+    """
+    Minimal .env parser:
+    - supports KEY=VALUE and `export KEY=VALUE`
+    - ignores blank lines and comments starting with #
+    - strips surrounding single/double quotes from VALUE
+    """
+    out: dict[str, str] = {}
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return out
+
+    for raw in lines:
+        s = raw.strip()
+        if not s or s.startswith("#"):
+            continue
+        if s.startswith("export "):
+            s = s[len("export ") :].strip()
+        if "=" not in s:
+            continue
+        k, v = s.split("=", 1)
+        k = k.strip()
+        v = _strip_quotes(v.strip())
+        if not k:
+            continue
+        out[k] = v
+    return out
+
+
+def _maybe_load_dotenv(dotenv: str, *, spec_path: str) -> pathlib.Path | None:
+    """
+    Loads env vars from a .env file into os.environ *if they are not already set*.
+    - dotenv="off": do nothing
+    - dotenv="auto": try (1) <spec_dir>/.env (2) <repo_root>/.env (3) <cwd>/.env
+    - otherwise: treat as a path to a .env file
+    """
+    mode = (dotenv or "").strip() or "auto"
+    if mode.lower() == "off":
+        return None
+
+    candidates: list[pathlib.Path]
+    if mode.lower() == "auto":
+        spec_dir = pathlib.Path(os.path.abspath(spec_path)).parent
+        candidates = [spec_dir / ".env", _repo_root() / ".env", pathlib.Path.cwd() / ".env"]
+        # De-dupe while preserving order.
+        uniq: list[pathlib.Path] = []
+        seen: set[str] = set()
+        for p in candidates:
+            key = str(p.resolve()) if p.exists() else str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq.append(p)
+        candidates = uniq
+    else:
+        candidates = [pathlib.Path(mode).expanduser()]
+
+    for p in candidates:
+        if not p.is_file():
+            continue
+        loaded = _load_dotenv_file(p)
+        for k, v in loaded.items():
+            if k and (k not in os.environ or (os.environ.get(k) or "") == ""):
+                os.environ[k] = v
+        # Only load the first file found in auto mode.
+        return p
+    return None
 
 
 def _json_dumps(x: Any) -> str:
@@ -335,8 +432,17 @@ def ensure_campaign(
             "Set target.create_if_missing=true or provide target.campaign_id."
         )
 
-    objective = _get_str(camp_cfg, "objective", "TRAFFIC").strip() or "TRAFFIC"
+    objective = _get_str(camp_cfg, "objective", "OUTCOME_TRAFFIC").strip() or "OUTCOME_TRAFFIC"
+    objective = objective.upper()
+    # Map common legacy/shorthand objectives to the v24+ "Outcome" objectives.
+    # Note: LINK_CLICKS is an ad set optimization goal; the campaign objective should be OUTCOME_TRAFFIC.
+    if objective in {"TRAFFIC", "LINK_CLICKS"}:
+        objective = "OUTCOME_TRAFFIC"
+    if objective == "APP_PROMOTION":
+        objective = "OUTCOME_APP_PROMOTION"
     buying_type = _get_str(camp_cfg, "buying_type", "AUCTION").strip() or "AUCTION"
+    # Meta requires this flag in some setups when not using campaign budget (CBO).
+    is_abs_enabled = _get_bool(camp_cfg, "is_adset_budget_sharing_enabled", False)
     special = camp_cfg.get("special_ad_categories", [])
     if not isinstance(special, list):
         special = []
@@ -349,6 +455,7 @@ def ensure_campaign(
                 "objective": objective,
                 "buying_type": buying_type,
                 "status": status,
+                "is_adset_budget_sharing_enabled": "true" if is_abs_enabled else "false",
                 "special_ad_categories": _json_dumps(special),
             },
         )
@@ -404,6 +511,8 @@ def ensure_adset(
     billing_event = _get_str(adset_cfg, "billing_event", "IMPRESSIONS").strip() or "IMPRESSIONS"
     optimization_goal = _get_str(adset_cfg, "optimization_goal", "LINK_CLICKS").strip() or "LINK_CLICKS"
     destination_type = _get_str(adset_cfg, "destination_type", "WEBSITE").strip() or "WEBSITE"
+    bid_strategy = _get_str(adset_cfg, "bid_strategy", "LOWEST_COST_WITHOUT_CAP").strip() or "LOWEST_COST_WITHOUT_CAP"
+    bid_strategy = bid_strategy.upper()
     targeting = adset_cfg.get(
         "targeting",
         {"geo_locations": {"countries": ["US"]}, "age_min": 18, "age_max": 65},
@@ -419,8 +528,21 @@ def ensure_adset(
         "billing_event": billing_event,
         "optimization_goal": optimization_goal,
         "destination_type": destination_type,
+        "bid_strategy": bid_strategy,
         "targeting": _json_dumps(targeting),
     }
+
+    # Only required for certain bid strategies.
+    if bid_strategy in {"LOWEST_COST_WITH_BID_CAP", "COST_CAP"}:
+        bid_amount = _get_int(adset_cfg, "bid_amount", 0)
+        if bid_amount <= 0:
+            _die("target.adset.bid_amount is required when bid_strategy is a cap strategy.")
+        payload["bid_amount"] = str(bid_amount)
+    if bid_strategy == "LOWEST_COST_WITH_MIN_ROAS":
+        bid_constraints = adset_cfg.get("bid_constraints")
+        if not isinstance(bid_constraints, dict):
+            _die("target.adset.bid_constraints is required when bid_strategy is LOWEST_COST_WITH_MIN_ROAS.")
+        payload["bid_constraints"] = _json_dumps(bid_constraints)
 
     resp = _retry(lambda: g.post_form(f"act_{ad_account_id}/adsets", payload))
     aid = resp.get("id")
@@ -469,6 +591,71 @@ def upload_video(g: MetaGraph, *, ad_account_id: str, file_path: str) -> str:
     if not isinstance(vid, str) or not vid:
         _die(f"Unexpected advideos response (missing id): {resp}")
     return vid
+
+
+def _thumb_file_for_video(video_path: str, *, out_dir: str) -> str:
+    st = os.stat(video_path)
+    key = f"{video_path}\n{st.st_size}\n{int(st.st_mtime)}"
+    name = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".jpg"
+    os.makedirs(out_dir, exist_ok=True)
+    return os.path.join(out_dir, name)
+
+
+def _generate_video_thumbnail(video_path: str, *, out_path: str, seek_s: float = 1.0) -> None:
+    """
+    Generate a single JPEG thumbnail from a video using ffmpeg.
+    """
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-ss",
+        str(seek_s),
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        out_path,
+    ]
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except FileNotFoundError:
+        _die("ffmpeg not found. Install ffmpeg or provide ads[].thumbnail_file for video ads.")
+    except subprocess.CalledProcessError:
+        _die("ffmpeg failed to generate a thumbnail. Provide ads[].thumbnail_file for video ads.")
+
+
+def get_video_thumbnail_hash(
+    g: MetaGraph,
+    *,
+    ad_account_id: str,
+    video_file_path: str,
+    thumbnail_file_path: str | None,
+    spec_dir: str,
+) -> str:
+    """
+    Return an adimages hash to use as a video thumbnail.
+
+    Priority:
+    1) ads[].thumbnail_file (if provided)
+    2) Auto-generate via ffmpeg (if available)
+    """
+    if g.dry_run:
+        return _dry_id("thumbhash", thumbnail_file_path or video_file_path)
+
+    if thumbnail_file_path:
+        p = thumbnail_file_path
+        if not os.path.isabs(p):
+            p = os.path.join(spec_dir, p)
+        if not os.path.isfile(p):
+            _die(f"thumbnail_file does not exist: {p}")
+        return upload_image(g, ad_account_id=ad_account_id, file_path=p)
+
+    out_path = _thumb_file_for_video(video_file_path, out_dir="/tmp/meta_ads_draft_uploader_thumbs")
+    if not os.path.isfile(out_path):
+        _generate_video_thumbnail(video_file_path, out_path=out_path, seek_s=1.0)
+    return upload_image(g, ad_account_id=ad_account_id, file_path=out_path)
 
 
 def wait_for_video(g: MetaGraph, *, video_id: str, timeout_s: int = 600, poll_s: int = 5) -> None:
@@ -544,6 +731,7 @@ def create_video_creative(
     page_id: str,
     name: str,
     video_id: str,
+    thumbnail_image_hash: str,
     destination_url: str,
     primary_text: str,
     headline: str,
@@ -559,6 +747,7 @@ def create_video_creative(
             "message": primary_text,
             "title": headline,
             "link_description": description,
+            "image_hash": thumbnail_image_hash,
             "call_to_action": {"type": cta_type, "value": {"link": destination_url}},
         },
     }
@@ -610,11 +799,25 @@ def main() -> int:
     ap.add_argument("--spec", required=True, help="Path to spec JSON.")
     ap.add_argument("--access-token-env", default="META_USER_ACCESS_TOKEN", help="Env var name for access token.")
     ap.add_argument("--app-secret-env", default="META_APP_SECRET", help="Env var name for app secret (optional; for appsecret_proof).")
+    ap.add_argument(
+        "--dotenv",
+        default="auto",
+        help="Load env vars from a .env file. Use 'auto' (default), 'off', or a path.",
+    )
     ap.add_argument("--dry-run", action="store_true", help="Print requests instead of calling Meta.")
     ap.add_argument("--json-out", default="", help="Write results JSON to this path.")
     ap.add_argument("--video-timeout-s", type=int, default=600, help="Max seconds to wait for video processing.")
     ap.add_argument("--max-pages", type=int, default=20, help="Max pages to scan when resolving by name.")
     args = ap.parse_args()
+
+    dotenv_loaded = _maybe_load_dotenv(args.dotenv, spec_path=args.spec)
+    print("Sanity check:")
+    print(f"- spec: {args.spec}")
+    print(f"- dotenv: {str(dotenv_loaded) if dotenv_loaded else 'not loaded'} (mode={args.dotenv})")
+    for k, optional in [(args.access_token_env, False), (args.app_secret_env, True)]:
+        present = bool(os.environ.get(k))
+        suffix = " (optional)" if optional else ""
+        print(f"- env {k}: {'set' if present else 'MISSING'}{suffix}")
 
     token = os.environ.get(args.access_token_env) or ""
     if not token:
@@ -640,6 +843,17 @@ def main() -> int:
 
     app_secret = os.environ.get(args.app_secret_env) or None
     g = MetaGraph(MetaConfig(graph_version=graph_version, access_token=token, app_secret=app_secret), dry_run=args.dry_run)
+
+    # Fail fast with a friendly message if the token is invalid/expired.
+    if not args.dry_run:
+        try:
+            me = g.get("/me", {"fields": "id,name"})
+            print(f"Token validation: OK (user={me.get('name')} id={me.get('id')})")
+        except Exception as e:
+            _die(
+                "Access token validation failed. Generate a fresh Meta user access token with ads_management.\n"
+                f"Details: {e}"
+            )
 
     # Safety invariant: never create ACTIVE containers or ads from this tool.
     status = "PAUSED"
@@ -678,6 +892,22 @@ def main() -> int:
 
     print(f"Using campaign_id={campaign_id or '<unknown>'} adset_id={adset_id} status={status}")
 
+    # Hard safety check: refuse to proceed if containers are ACTIVE for any reason.
+    if not args.dry_run:
+        try:
+            camp = g.get(campaign_id, {"fields": "id,name,status,effective_status"})
+            aset = g.get(adset_id, {"fields": "id,name,status,effective_status"})
+            for node, kind in [(camp, "campaign"), (aset, "adset")]:
+                st = str(node.get("status") or "").upper()
+                est = str(node.get("effective_status") or "").upper()
+                if st == "ACTIVE" or est == "ACTIVE":
+                    _die(
+                        f"Safety check failed: resolved {kind} is ACTIVE (status={st} effective_status={est}). "
+                        "Refusing to create ads. Pause it in Ads Manager and retry."
+                    )
+        except Exception as e:
+            _die(f"Safety check failed while verifying paused statuses: {e}")
+
     results: dict[str, Any] = {
         "graph_version": graph_version,
         "ad_account_id": f"act_{ad_account_id}",
@@ -706,8 +936,9 @@ def main() -> int:
             _die(f"ads[{idx}].file does not exist: {file_path}")
 
         merged = _merge_defaults(defaults, ad)
-        destination_url = str(merged.get("destination_url") or "")
-        cta_type = str(merged.get("cta_type") or "LEARN_MORE")
+        destination_url = _normalize_url(str(merged.get("destination_url") or ""))
+        # Ignore user-provided CTA; enforce a consistent CTA for hackathon speed.
+        cta_type = CTA_TYPE
         primary_text = str(merged.get("primary_text") or "")
         headline = str(merged.get("headline") or "")
         description = str(merged.get("description") or "")
@@ -746,16 +977,28 @@ def main() -> int:
             )
             row["creative_id"] = creative_id
         else:
+            thumbnail_file = str(ad.get("thumbnail_file") or "").strip() or None
             video_id = upload_video(g, ad_account_id=ad_account_id, file_path=file_path)
             row["video_id"] = video_id
+            print(f"Uploaded video_id={video_id}")
             if not args.dry_run:
                 wait_for_video(g, video_id=video_id, timeout_s=args.video_timeout_s)
+            thumb_hash = get_video_thumbnail_hash(
+                g,
+                ad_account_id=ad_account_id,
+                video_file_path=file_path,
+                thumbnail_file_path=thumbnail_file,
+                spec_dir=spec_dir,
+            )
+            row["thumbnail_image_hash"] = thumb_hash
+            print(f"Using thumbnail_image_hash={thumb_hash}")
             creative_id = create_video_creative(
                 g,
                 ad_account_id=ad_account_id,
                 page_id=page_id,
                 name=f"{name} (Creative)",
                 video_id=video_id,
+                thumbnail_image_hash=thumb_hash,
                 destination_url=destination_url,
                 primary_text=primary_text,
                 headline=headline,
@@ -763,6 +1006,7 @@ def main() -> int:
                 cta_type=cta_type,
             )
             row["creative_id"] = creative_id
+            print(f"Created creative_id={creative_id}")
 
         ad_id = create_ad(
             g,

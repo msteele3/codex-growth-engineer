@@ -1,0 +1,45 @@
+{
+  "product_name": "Companion AI",
+  "brand": {
+    "font": "system",
+    "colors": {
+      "primary": "#ff1e57",
+      "primary_foreground": "#fff1f2",
+      "background_dark": "#0c0a09",
+      "surface_light": "#f4f4f5",
+      "ink": "#0c0a09",
+      "muted_ink": "#79716b"
+    }
+  },
+  "claims": {
+    "features": [
+      "Create and customize your companion (look, personality, role)",
+      "Text, voice, and video calls",
+      "Remembers important details across conversations",
+      "Keeps a journal of meaningful moments",
+      "Send voice messages and photos"
+    ],
+    "outcomes": [
+      "Someone to talk to anytime",
+      "Conversations that build over time instead of restarting from scratch"
+    ],
+    "forbidden": [
+      "Avoid therapy/medical framing, diagnoses, or treatment claims",
+      "Avoid 'no limits' implying unsafe/sexual/under-18 content; keep PG-13",
+      "Avoid absolute promises like 'remembers everything'; say 'remembers important details' / 'keeps context'"
+    ]
+  },
+  "cta": {
+    "destination_url": "https://apps.apple.com/us/app/companion-ai/id6755073128",
+    "headline": "Companion AI",
+    "primary_text": "Meet Companion AI: a companion that listens, remembers important details, and grows with you. Text, voice, and video.",
+    "description": ""
+  },
+  "meta": {
+    "ad_account_id_env": "META_AD_ACCOUNT_ID",
+    "page_id_env": "META_PAGE_ID",
+    "access_token_env": "META_USER_ACCESS_TOKEN",
+    "graph_version_env": "META_GRAPH_VERSION"
+  }
+}
+

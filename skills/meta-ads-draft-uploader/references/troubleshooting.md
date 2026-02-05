@@ -42,6 +42,15 @@ Fix in Business Settings:
 Note:
 - `GET /{page_id}?fields=id,name` can succeed even if you do not have a Page role (it is often public data). The real test is whether creating an AdCreative with that `page_id` succeeds.
 
+## "Ads creative post was created by an app that is in development mode"
+
+If you see an error like:
+- "Ads creative post was created by an app that is in development mode. It must be in public to create this ad."
+
+Fix:
+- Switch your Meta developer app to Live/Public mode, or
+- Use a user access token issued for a Live app (for hackathons, a token created via Graph API Explorer can work).
+
 ## Rate limits
 
 Retry with exponential backoff when Meta returns transient errors.

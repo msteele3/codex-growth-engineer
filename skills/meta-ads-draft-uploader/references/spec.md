@@ -9,16 +9,18 @@ Minimal required fields:
 
 All string IDs should be strings.
 
+CTA:
+- This skill always uses a Download CTA (`DOWNLOAD`) regardless of any `cta_type` provided in the spec.
+
 ## Example
 
 ```json
 {
   "graph_version": "v24.0",
   "ad_account_id": "730744483436372",
-  "page_id": "807789605443819",
+  "page_id": "965650646625645",
   "default": {
-    "destination_url": "https://example.com",
-    "cta_type": "LEARN_MORE",
+    "destination_url": "https://apps.apple.com/us/app/companion-ai/id6755073128",
     "primary_text": "Primary text goes here.",
     "headline": "Headline goes here.",
     "description": ""
@@ -29,11 +31,13 @@ All string IDs should be strings.
     "create_if_missing": true,
     "reuse_by_name": true,
     "campaign": {
-      "objective": "TRAFFIC",
+      "objective": "OUTCOME_TRAFFIC",
+      "is_adset_budget_sharing_enabled": false,
       "special_ad_categories": []
     },
     "adset": {
       "daily_budget": 100,
+      "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
       "billing_event": "IMPRESSIONS",
       "optimization_goal": "LINK_CLICKS",
       "destination_type": "WEBSITE",
@@ -82,7 +86,6 @@ If `target` is omitted entirely, the script uses:
 
 Each entry in `ads[]` may override:
 - `destination_url`
-- `cta_type`
 - `primary_text`
 - `headline`
 - `description`
@@ -91,4 +94,5 @@ Each entry in `ads[]` may override:
 
 - This skill always creates `PAUSED` objects (campaign, ad set, ads).
 - `ads[].file` paths are resolved relative to the spec file location unless you provide an absolute path.
+- For `type="video"` ads, the script will auto-generate a thumbnail via `ffmpeg` and upload it. You can override this by providing `ads[].thumbnail_file`.
 - For Instagram placements you will typically need `ig_actor_id` and/or Page-to-IG linkage; this is intentionally out of scope for the first cut.

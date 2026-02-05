@@ -1,0 +1,4 @@
+display_name: "X Sentiment (bird)"
+short_description: "Use the bird CLI to fetch recent X (Twitter) posts and generate a sentiment + themes report (positive/neutral/negative)."
+default_prompt: "Analyze sentiment on X for a given query. Use `python3 skills/x-sentiment-bird/scripts/analyze_x_sentiment.py --query \"...\" -n 30` to fetch recent posts via `bird`, classify sentiment, and produce a concise report with top positive/negative posts and recurring themes."
+
