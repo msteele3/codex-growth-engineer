@@ -11,6 +11,8 @@ This skill is intentionally scoped to speed and safety:
 - Default everything to `PAUSED`.
 - Use a single JSON spec file for batch creation.
 - If a Campaign/Ad Set exists, reuse it; otherwise create them (unless explicitly disabled).
+- Safe defaults: if the spec omits ad set optimization settings, the script defaults to `optimization_goal=IMPRESSIONS` (more forgiving for video ads).
+- If the spec omits `target.campaign`/`target.adset` tuning, the script prints which defaults it applied when creating objects.
 
 Terminology:
 - Meta “ad group” == Meta “ad set”.
@@ -26,6 +28,13 @@ Safety invariant:
 
 ```bash
 export META_USER_ACCESS_TOKEN="EAAB..."
+```
+
+Optional (lets you omit `ad_account_id` and `page_id` from the spec):
+
+```bash
+export META_AD_ACCOUNT_ID="730744483436372"
+export META_PAGE_ID="965650646625645"
 ```
 
 Alternatively, put `META_USER_ACCESS_TOKEN=...` in a `.env` file (the script will auto-load the first `.env` it finds from: the spec file’s directory, the repo root, or your current working directory). To disable this behavior, pass `--dotenv off`.

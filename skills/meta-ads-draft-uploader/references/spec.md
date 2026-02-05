@@ -3,14 +3,18 @@
 Use a single JSON file as input to the uploader script.
 
 Minimal required fields:
-- `ad_account_id` (numeric, no `act_` prefix)
-- `page_id`
+- `ad_account_id` (numeric, no `act_` prefix) (or set `META_AD_ACCOUNT_ID`)
+- `page_id` (or set `META_PAGE_ID`)
 - `ads[]` with `type`, `name`, `file`
 
 All string IDs should be strings.
 
 CTA:
 - This skill always uses a Download CTA (`DOWNLOAD`) regardless of any `cta_type` provided in the spec.
+
+Target tuning (optional):
+- You may omit `target` entirely. The script will create/reuse a paused campaign + ad set using defaults.
+- When the script creates a campaign/ad set, it prints which fields were defaulted.
 
 ## Example
 
@@ -95,4 +99,5 @@ Each entry in `ads[]` may override:
 - This skill always creates `PAUSED` objects (campaign, ad set, ads).
 - `ads[].file` paths are resolved relative to the spec file location unless you provide an absolute path.
 - For `type="video"` ads, the script will auto-generate a thumbnail via `ffmpeg` and upload it. You can override this by providing `ads[].thumbnail_file`.
+- If you omit `target.adset.optimization_goal`, the script defaults it to `IMPRESSIONS` (safer default for video creatives).
 - For Instagram placements you will typically need `ig_actor_id` and/or Page-to-IG linkage; this is intentionally out of scope for the first cut.
