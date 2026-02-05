@@ -1,8 +1,12 @@
 *.DS_STORE
 tmp
 .env
-.env.*
-!.env.example
+.state/
+inbox/
 __pycache__/
 *.pyc
+node_modules/
+.expo/
+.env.*
+!.env.example
 data
