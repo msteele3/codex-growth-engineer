@@ -1,0 +1,3 @@
+display_name: "Competitor Updates Analysis"
+short_description: "Fetch App Store pages for competitor apps, persist daily snapshots, and generate change analysis from reviews, release notes, and pricing."
+default_prompt: "Given a list of App Store app URLs, fetch and persist today’s snapshot (review count, last update date, release notes, subscription pricing points, 5 recent reviews). If prior snapshots exist, compare and write an analysis of what changed and what users love/hate."
