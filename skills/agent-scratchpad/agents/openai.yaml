@@ -1,0 +1,3 @@
+display_name: "Agent Scratchpad"
+short_description: "Shared scratchpad for multi-agent coordination: tasks, pointers to outputs, and open questions."
+default_prompt: "Use the shared scratchpad at scratchpad/AGENT_SCRATCHPAD.md as the coordination layer across multiple agents. Read it first, then append concise entries (TASK/POINTER/QUESTION/ANSWER) with concrete file paths and commands. Leave QUESTIONS instead of blocking; answer and close question ids when resolved. Prefer the helper CLI at skills/agent-scratchpad/scripts/scratchpad.py."

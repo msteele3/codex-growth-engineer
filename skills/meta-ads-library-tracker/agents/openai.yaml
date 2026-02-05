@@ -1,0 +1,3 @@
+display_name: "Meta Ads Library Tracker"
+short_description: "Scrape Meta Ads Library and generate creative teardowns."
+default_prompt: "Given a list of Meta Ads Library advertiser URLs (saved searches with view_all_page_id=...), collect the top 5 longest-running active ads per advertiser. Download image/video creatives, extract 1 fps frames + audio for videos (cap 30s), transcribe audio with the OpenAI API, and output JSON + Markdown creative teardowns (hook, visual sequence, style, colors). Do not download landing page HTML."

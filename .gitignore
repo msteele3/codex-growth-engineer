@@ -1,2 +1,7 @@
 *.DS_STORE
 tmp
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
