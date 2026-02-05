@@ -29,6 +29,8 @@ python3 skills/competitor-updates-analysis/scripts/track_apps.py \
   --urls-file competitor_urls.txt \
   --out-dir data/update-tracker \
   --country us \
+  --retries 3 \
+  --retry-backoff 0.75 \
   --max-reviews 10
 ```
 

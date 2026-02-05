@@ -11,6 +11,7 @@ import json
 import os
 import pathlib
 import re
+import socket
 import time
 import urllib.error
 import urllib.parse
@@ -53,6 +54,65 @@ def _slugify(s: str) -> str:
     return s or "app"
 
 
+def _is_retryable_network_error(err: BaseException) -> bool:
+    # Focused retry policy: handle transient DNS/name-resolution and timeout-ish failures.
+    #
+    # Covers errors like:
+    #   URLError: <urlopen error [Errno 8] nodename nor servname provided, or not known>
+    if isinstance(err, TimeoutError):
+        return True
+    if isinstance(err, socket.timeout):
+        return True
+    if isinstance(err, urllib.error.URLError):
+        reason = getattr(err, "reason", None)
+        if isinstance(reason, socket.gaierror):
+            return True
+        if isinstance(reason, OSError) and getattr(reason, "errno", None) in {8, -2, 110}:
+            return True
+        msg = str(reason or err).lower()
+        if any(
+            needle in msg
+            for needle in [
+                "nodename nor servname provided",
+                "name or service not known",
+                "temporary failure in name resolution",
+                "timed out",
+                "timeout",
+            ]
+        ):
+            return True
+    return False
+
+
+def _fetch_with_retries(
+    url: str,
+    *,
+    timeout_s: int,
+    headers: dict[str, str],
+    retries: int,
+    backoff_s: float,
+    max_backoff_s: float = 8.0,
+) -> tuple[bytes, str, dict[str, str]]:
+    # Deterministic exponential backoff (no randomness) to keep behavior stable.
+    last_err: BaseException | None = None
+    retries = max(0, int(retries))
+    backoff_s = max(0.0, float(backoff_s))
+    for attempt in range(retries + 1):
+        try:
+            return _fetch(url, timeout_s=timeout_s, headers=headers)
+        except urllib.error.HTTPError:
+            # Treat HTTP errors as "real responses"; don't retry here.
+            raise
+        except BaseException as e:
+            last_err = e
+            if attempt >= retries or not _is_retryable_network_error(e):
+                raise
+            delay = min(max_backoff_s, backoff_s * (2**attempt) + (0.05 * attempt))
+            time.sleep(delay)
+    assert last_err is not None
+    raise last_err
+
+
 def _fetch(url: str, *, timeout_s: int, headers: dict[str, str]) -> tuple[bytes, str, dict[str, str]]:
     req = urllib.request.Request(url, headers=headers)
     try:
@@ -82,9 +142,23 @@ def _decode_html(raw: bytes, headers: dict[str, str]) -> str:
         return raw.decode("utf-8", errors="replace")
 
 
-def _parse_itunes_lookup(app_id: str, *, country: str, timeout_s: int, headers: dict[str, str]) -> dict[str, Any]:
+def _parse_itunes_lookup(
+    app_id: str,
+    *,
+    country: str,
+    timeout_s: int,
+    headers: dict[str, str],
+    retries: int,
+    backoff_s: float,
+) -> dict[str, Any]:
     url = f"https://itunes.apple.com/lookup?id={urllib.parse.quote(app_id)}&country={urllib.parse.quote(country)}"
-    raw, _, resp_headers = _fetch(url, timeout_s=timeout_s, headers=headers)
+    raw, _, resp_headers = _fetch_with_retries(
+        url,
+        timeout_s=timeout_s,
+        headers=headers,
+        retries=retries,
+        backoff_s=backoff_s,
+    )
     txt = raw.decode("utf-8", errors="replace")
     data = json.loads(txt)
     if not isinstance(data, dict) or "results" not in data:
@@ -487,6 +561,8 @@ def main() -> int:
     ap.add_argument("--country", type=str, default="us", help="2-letter App Store country code for lookup/reviews URL building.")
     ap.add_argument("--date", type=str, default=_today_local(), help="Snapshot date (YYYY-MM-DD). Defaults to today local.")
     ap.add_argument("--timeout", type=int, default=25, help="Per-request timeout (seconds).")
+    ap.add_argument("--retries", type=int, default=3, help="Retries for transient network/DNS failures (per request).")
+    ap.add_argument("--retry-backoff", type=float, default=0.75, help="Initial backoff seconds for retries (exponential).")
     ap.add_argument("--max-reviews", type=int, default=5, help="Number of most recent reviews to attempt to capture.")
     ap.add_argument("--sleep", type=float, default=1.0, help="Seconds to sleep between apps.")
     args = ap.parse_args()
@@ -538,7 +614,14 @@ def main() -> int:
 
             # iTunes lookup (stable metadata).
             try:
-                rec = _parse_itunes_lookup(app_id, country=args.country, timeout_s=args.timeout, headers=headers)
+                rec = _parse_itunes_lookup(
+                    app_id,
+                    country=args.country,
+                    timeout_s=args.timeout,
+                    headers=headers,
+                    retries=args.retries,
+                    backoff_s=args.retry_backoff,
+                )
                 result["lookup_url"] = rec.get("_lookup_url")
                 result["app_name"] = rec.get("trackName")
                 result["seller_name"] = rec.get("sellerName")
@@ -563,7 +646,13 @@ def main() -> int:
             html_errors: list[str] = []
             page_html = ""
             try:
-                raw, final_url, resp_headers = _fetch(url, timeout_s=args.timeout, headers=headers)
+                raw, final_url, resp_headers = _fetch_with_retries(
+                    url,
+                    timeout_s=args.timeout,
+                    headers=headers,
+                    retries=args.retries,
+                    backoff_s=args.retry_backoff,
+                )
                 page_html = _decode_html(raw, resp_headers)
                 result["final_url"] = final_url
             except Exception as e:
@@ -598,7 +687,13 @@ def main() -> int:
                 try:
                     reviews_url = _with_query_param(url, "see-all", "reviews")
                     reviews_url = _with_query_param(reviews_url, "sort", "mostRecent")
-                    raw, _, resp_headers = _fetch(reviews_url, timeout_s=args.timeout, headers=headers)
+                    raw, _, resp_headers = _fetch_with_retries(
+                        reviews_url,
+                        timeout_s=args.timeout,
+                        headers=headers,
+                        retries=args.retries,
+                        backoff_s=args.retry_backoff,
+                    )
                     reviews_html = _decode_html(raw, resp_headers)
                     result["reviews_url"] = reviews_url
                 except Exception as e:

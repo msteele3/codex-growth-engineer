@@ -96,12 +96,16 @@ def _load_dotenv_file(path: pathlib.Path) -> dict[str, str]:
     return out
 
 
-def _maybe_load_dotenv(mode: str, *, repo: pathlib.Path) -> pathlib.Path | None:
+def _maybe_load_dotenv(mode: str, *, repo: pathlib.Path, override: bool) -> pathlib.Path | None:
     """
-    Loads env vars from a .env file into os.environ *if they are not already set*.
+    Loads env vars from a .env file into os.environ.
     - mode="off": do nothing
     - mode="auto": try <repo_root>/.env then <cwd>/.env
     - otherwise: treat as a path to a .env file
+
+    By default, this only sets missing/empty env vars. If override=True, values from
+    the .env file replace already-set env vars. This is important for automations,
+    where stale/bad keys can be present in the runner environment.
     """
     m = (mode or "").strip() or "auto"
     if m.lower() == "off":
@@ -116,8 +120,13 @@ def _maybe_load_dotenv(mode: str, *, repo: pathlib.Path) -> pathlib.Path | None:
             continue
         loaded = _load_dotenv_file(p)
         for k, v in loaded.items():
-            if k and (k not in os.environ or (os.environ.get(k) or "") == ""):
+            if not k:
+                continue
+            if override:
                 os.environ[k] = v
+            else:
+                if k not in os.environ or (os.environ.get(k) or "") == "":
+                    os.environ[k] = v
         return p
     return None
 
@@ -218,6 +227,11 @@ def main(argv: list[str]) -> int:
         default="auto",
         help="Load env vars from a .env file. Use 'auto' (default), 'off', or a path.",
     )
+    ap.add_argument(
+        "--dotenv-override",
+        action="store_true",
+        help="If set, .env values override already-set env vars (useful for automations).",
+    )
 
     ap.add_argument("--skip-track", action="store_true", help="Skip running track_ads.py (use existing snapshot).")
     ap.add_argument("--analysis-only", action="store_true", help="If set, run track_ads.py in analysis-only mode.")
@@ -239,7 +253,7 @@ def main(argv: list[str]) -> int:
     out_dir = pathlib.Path(args.out_dir)
     brief_path = pathlib.Path(args.product_brief)
 
-    _maybe_load_dotenv(args.dotenv, repo=repo)
+    _maybe_load_dotenv(args.dotenv, repo=repo, override=bool(args.dotenv_override))
 
     if not brief_path.exists():
         _die(
@@ -277,6 +291,9 @@ def main(argv: list[str]) -> int:
             str(out_dir),
             "--top-n",
             str(args.top_n),
+            "--browser-channel",
+            "",
+            "--allow-channel-fallback",
             "--max-video-seconds",
             "12",
             "--fps",
@@ -353,6 +370,8 @@ def main(argv: list[str]) -> int:
             "--download",
             "--variant",
             "video",
+            # Allows reruns on the same day/ad_id without failing when outputs already exist.
+            "--force",
             "--out",
             str(sora_out),
             "--json-out",
