@@ -1,0 +1,4 @@
+display_name: "Example Skill"
+short_description: "Minimal example skill folder (SKILL.md + agents metadata + a tiny script)."
+default_prompt: "Create a new skill folder based on this example. Ask for the skill name and triggering description, then scaffold SKILL.md and agents/openai.yaml, and add any scripts/references needed."
+
