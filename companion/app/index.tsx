@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
   KeyboardAvoidingView,
@@ -16,7 +16,10 @@ import { Image } from 'expo-image';
 const OPENAI_API_KEY = process.env.EXPO_PUBLIC_OPENAI_API_KEY;
 
 function TypingDots() {
-  const dots = [useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current, useRef(new Animated.Value(0)).current];
+  const dot1 = useRef(new Animated.Value(0)).current;
+  const dot2 = useRef(new Animated.Value(0)).current;
+  const dot3 = useRef(new Animated.Value(0)).current;
+  const dots = useMemo(() => [dot1, dot2, dot3], [dot1, dot2, dot3]);
 
   useEffect(() => {
     const animations = dots.map((dot, i) =>
@@ -30,7 +33,7 @@ function TypingDots() {
     );
     animations.forEach((a) => a.start());
     return () => animations.forEach((a) => a.stop());
-  }, []);
+  }, [dots]);
 
   return (
     <View style={{ flexDirection: 'row', gap: 4, paddingVertical: 4, paddingHorizontal: 2 }}>
@@ -63,6 +66,8 @@ export default function ChatScreen() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
+  const [modelMenuOpen, setModelMenuOpen] = useState(false);
+  const [selectedModel, setSelectedModel] = useState('gpt5.2');
 
   const sendMessage = async () => {
     const text = input.trim();
@@ -82,7 +87,7 @@ export default function ChatScreen() {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
         },
         body: JSON.stringify({
-          model: 'gpt-4o-mini',
+          model: selectedModel,
           messages: [{ role: 'system', content: SYSTEM_PROMPT }, ...updated],
           max_tokens: 256,
         }),
@@ -168,6 +173,37 @@ export default function ChatScreen() {
       </ScrollView>
 
       <View style={[styles.inputBar, { paddingBottom: insets.bottom + 8 }]}>
+        <View style={styles.modelSelector}>
+          <Pressable
+            onPress={() => setModelMenuOpen((prev) => !prev)}
+            style={styles.modelButton}
+          >
+            <Text style={styles.modelButtonText}>{selectedModel}</Text>
+          </Pressable>
+          {modelMenuOpen && (
+            <View style={styles.modelMenu}>
+              {['gpt5.2', 'gpt-4o-mini', 'gpt-4.1'].map((model) => (
+                <Pressable
+                  key={model}
+                  style={styles.modelMenuItem}
+                  onPress={() => {
+                    setSelectedModel(model);
+                    setModelMenuOpen(false);
+                  }}
+                >
+                  <Text
+                    style={[
+                      styles.modelMenuText,
+                      model === selectedModel && styles.modelMenuTextActive,
+                    ]}
+                  >
+                    {model}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+        </View>
         <TextInput
           style={styles.input}
           placeholder="Say something..."
@@ -270,6 +306,46 @@ const styles = StyleSheet.create({
     paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: '#1a1a1a',
+  },
+  modelSelector: {
+    position: 'relative',
+    marginBottom: 2,
+  },
+  modelButton: {
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    backgroundColor: '#111',
+  },
+  modelButtonText: {
+    color: '#ddd',
+    fontSize: 12,
+  },
+  modelMenu: {
+    position: 'absolute',
+    bottom: 44,
+    left: 0,
+    minWidth: 140,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#2a2a2a',
+    backgroundColor: '#111',
+    paddingVertical: 6,
+    zIndex: 20,
+  },
+  modelMenuItem: {
+    paddingVertical: 10,
+    paddingHorizontal: 12,
+  },
+  modelMenuText: {
+    color: '#ddd',
+    fontSize: 12,
+  },
+  modelMenuTextActive: {
+    color: '#fff',
+    fontWeight: '600',
   },
   input: {
     flex: 1,
