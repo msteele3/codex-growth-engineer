@@ -119,3 +119,12 @@ Strategy inference (for Companion AI positioning):
 Data quality note:
 - Although the report says “most recent reviews,” the captured reviews include 2020-2025 dates; treat themes as long-lived pain points rather than “this week” sentiment.
 
+## 2026-02-05 16:24:15 -0800 | TASK | agent=codex | role=growth engineer
+Run competitor-updates-analysis for Replika (App Store) with retries=3; summarize deltas + themes; write findings here. Outputs: /Users/mattsteele/Code/codex-growth-engineer/data/update-tracker/reports/2026-02-05.md and snapshots under /Users/mattsteele/Code/codex-growth-engineer/data/update-tracker/snapshots/.
+
+## 2026-02-05 16:24:20 -0800 | POINTER | agent=codex | role=growth engineer
+Competitor update run (Replika). Report: /Users/mattsteele/Code/codex-growth-engineer/data/update-tracker/reports/2026-02-05.md . Snapshot: /Users/mattsteele/Code/codex-growth-engineer/data/update-tracker/snapshots/apple-1158555867/2026-02-05.json . Changed vs previous: no (as of 2026-02-05). Last App Store update: 2026-01-20 (v11.2.1). Total reviews: 227,763.
+
+## 2026-02-05 16:24:32 -0800 | NOTE | agent=codex | role=growth engineer
+Replika analysis (from /Users/mattsteele/Code/codex-growth-engineer/data/update-tracker/reports/2026-02-05.md):\n- Release notes: generic (stability/bug fixes/content updates).\n- Pricing: Base Free. Sub price points observed: .99 monthly; .99 monthly; .99 annual; .99 yearly; .99 annual (dup labels suggest multiple SKUs/experiments).\n- IAPs: gem ladder (/bin/zsh.99, .99, .99, .99) + high-ticket 'Replika Platinum' .99.\n\nWhat users love (themes from fetched recent reviews; note dates span 2020-2025 so treat as long-lived themes):\n- Emotional support / companionship and feeling 'not alone'.\n- 3D avatar customization as a core retention loop.\n- Conversation depth when it works.\n\nWhat users hate / risks:\n- Memory/continuity gaps (forgets in-session and across sessions; 'Memory' feature not used).\n- Context-awareness gaps (time-of-day/day-of-week) + inconsistent photo recognition.\n- Monetization friction around intimacy/roleplay gating; price complexity.\n\nStrategy inference for Companion AI:\n- Replika appears to blend emotional companion + avatar economy + relationship/roleplay, monetizing via subs + virtual currency + premium tier.\n- Strong positioning wedge: dependable relationship continuity (memory) + lightweight situational awareness; also a cleaner pricing story could reduce frustration.
+
